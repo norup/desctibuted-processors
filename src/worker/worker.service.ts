@@ -30,8 +30,16 @@ export class WorkerService {
 
   private async getLinksInProcess(): Promise<LinksEntity[]> {
     try {
-      const result = await this.linksRepository.query(
-        `UPDATE "links"
+      // Added transaction to avoid race condition
+      const queryRunner =
+        this.linksRepository.manager.connection.createQueryRunner();
+
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
+
+      try {
+        const result = await this.linksRepository.query(
+          `UPDATE "links"
          SET "status" = $1
          WHERE "id" IN (
              SELECT "id" FROM "links"
@@ -41,12 +49,20 @@ export class WorkerService {
              FOR UPDATE SKIP LOCKED
          )
          RETURNING *;`,
-        [LinkStatus.PROCESSING, LinkStatus.NEW, this.MAX_CONCURRENT_REQUESTS],
-      );
+          [LinkStatus.PROCESSING, LinkStatus.NEW, this.MAX_CONCURRENT_REQUESTS],
+        );
 
-      return result[0];
+        await queryRunner.commitTransaction();
+        return result[0];
+      } catch (error) {
+        await queryRunner.rollbackTransaction();
+        this.logger.error('Error in getLinksInProcess:', error);
+        return [];
+      } finally {
+        await queryRunner.release();
+      }
     } catch (error) {
-      this.logger.error('Error in getNextBatch:', error);
+      this.logger.error('Database error in getLinksInProcess:', error);
       return [];
     }
   }
